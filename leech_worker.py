@@ -274,7 +274,7 @@ async def main():
                                              progress=lambda c, t: asyncio.create_task(upload_progress(c, t)))
             except Exception as up_err:
                 print(f"Error uploading {f_name}: {up_err}")
-                _tg_call("sendMessage", chat_id=CHAT_ID, text=f"❌ Failed to upload {f_name}")
+                _tg_call("sendMessage", chat_id=CHAT_ID, text=f"❌ Failed to upload {f_name}\nError: {up_err}")
 
             os.remove(f)
 
