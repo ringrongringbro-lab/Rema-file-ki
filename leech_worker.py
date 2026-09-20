@@ -189,7 +189,7 @@ async def extract_with_7z(archive_path, extract_dir):
 
 
 # ---------------- UPLOAD PROGRESS (Pyrogram callback) ----------------
-async def upload_progress(current, total):
+def upload_progress(current, total):
     pct = current * 100 / total if total else 0
     maybe_edit_status(f"🚀 Uploading... {pct:.1f}%\n{current/1024/1024:.1f}MB / {total/1024/1024:.1f}MB")
 
@@ -268,10 +268,10 @@ async def main():
             try:
                 if f_ext in VIDEO_EXTS:
                     await app.send_video(CHAT_ID, f, caption=caption, supports_streaming=True,
-                                          progress=lambda c, t: asyncio.create_task(upload_progress(c, t)))
+                                          progress=upload_progress)
                 else:
                     await app.send_document(CHAT_ID, f, caption=caption,
-                                             progress=lambda c, t: asyncio.create_task(upload_progress(c, t)))
+                                             progress=upload_progress)
             except Exception as up_err:
                 print(f"Error uploading {f_name}: {up_err}")
                 _tg_call("sendMessage", chat_id=CHAT_ID, text=f"❌ Failed to upload {f_name}\nError: {up_err}")
