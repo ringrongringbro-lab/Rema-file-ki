@@ -1,31 +1,12 @@
 name: Leech Bot Worker
+run-name: Leech task #${{ github.event.inputs.task_id }}
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'Source download link'
+        description: 'Source download link / magnet / .torrent'
         required: true
-      name:
-        description: 'Series/Movie Name'
-        required: false
-        default: 'Unknown'
-      season:
-        description: 'Season'
-        required: false
-        default: '01'
-      voice:
-        description: 'Voice/Language'
-        required: false
-        default: 'Hindi'
-      quality:
-        description: 'Quality'
-        required: false
-        default: '1080p'
-      episode:
-        description: 'Episode (single-file leech only)'
-        required: false
-        default: '01'
       chat_id:
         description: 'Telegram Chat ID to deliver to'
         required: true
@@ -33,6 +14,21 @@ on:
         description: 'Status message ID to edit/delete'
         required: false
         default: 'none'
+      task_id:
+        description: 'Task ID from the controller (for queue/cancel)'
+        required: true
+      rename:
+        description: 'New file name (empty = keep original)'
+        required: false
+        default: ''
+      fmt:
+        description: 'Upload format: media or document'
+        required: false
+        default: 'media'
+      thumb:
+        description: 'Telegram file_id of the thumbnail (empty = none)'
+        required: false
+        default: ''
 
 jobs:
   leech_job:
@@ -40,6 +36,22 @@ jobs:
     timeout-minutes: 350  # runner hard cap is 360; leave a small buffer
 
     steps:
+      - name: Report start to controller
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+          TASK_ID: ${{ github.event.inputs.task_id }}
+        run: |
+          RESP=$(curl -s -m 20 -X POST "$WORKER_URL/cb" \
+            -H "X-Callback-Secret: $CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "{\"event\":\"start\",\"task_id\":$TASK_ID,\"run_id\":${{ github.run_id }}}" || true)
+          echo "controller: $RESP"
+          if echo "$RESP" | grep -q '"cancelled":true'; then
+            echo "Task cancelled before start"
+            exit 1
+          fi
+
       - name: Checkout Code
         uses: actions/checkout@v4
 
@@ -49,10 +61,10 @@ jobs:
           python-version: '3.10'
           cache: 'pip'   # pip cache reused across runs -> faster installs
 
-      - name: Install aria2 + 7zip (apt cache speeds up repeat runs)
+      - name: Install aria2 + 7zip + ffmpeg (apt cache speeds up repeat runs)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends aria2 p7zip-full
+          sudo apt-get install -y --no-install-recommends aria2 p7zip-full ffmpeg
 
       - name: Install Python dependencies
         run: pip install --no-cache-dir -r requirements.txt
@@ -63,11 +75,22 @@ jobs:
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           URL: ${{ github.event.inputs.url }}
-          META_NAME: ${{ github.event.inputs.name }}
-          META_SEASON: ${{ github.event.inputs.season }}
-          META_VOICE: ${{ github.event.inputs.voice }}
-          META_QUALITY: ${{ github.event.inputs.quality }}
-          MANUAL_EP: ${{ github.event.inputs.episode }}
+          RENAME: ${{ github.event.inputs.rename }}
+          UPLOAD_FORMAT: ${{ github.event.inputs.fmt }}
+          THUMB_FILE_ID: ${{ github.event.inputs.thumb }}
           CHAT_ID: ${{ github.event.inputs.chat_id }}
           TRIGGER_MSG_ID: ${{ github.event.inputs.trigger_msg_id }}
         run: python leech_worker.py
+
+      - name: Report finish to controller
+        if: always()
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+          TASK_ID: ${{ github.event.inputs.task_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          curl -s -m 20 -X POST "$WORKER_URL/cb" \
+            -H "X-Callback-Secret: $CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "{\"event\":\"done\",\"task_id\":$TASK_ID,\"status\":\"$JOB_STATUS\"}" || true
