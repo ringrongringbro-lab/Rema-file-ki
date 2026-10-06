@@ -2,6 +2,7 @@
   "name": "leech-controller",
   "main": "worker.js",
   "compatibility_date": "2025-09-01",
+  "keep_vars": true,
   "d1_databases": [
     { "binding": "DB", "database_name": "leech-db", "database_id": "292d0fcb-b335-4316-bf5e-88f818538659" }
   ]
