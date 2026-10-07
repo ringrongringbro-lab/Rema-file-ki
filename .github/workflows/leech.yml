@@ -29,6 +29,10 @@ on:
         description: 'Telegram file_id of the thumbnail (empty = none)'
         required: false
         default: ''
+      extract_subs:
+        description: 'true = also send subtitle tracks/files separately'
+        required: false
+        default: 'false'
 
 jobs:
   leech_job:
@@ -78,6 +82,7 @@ jobs:
           RENAME: ${{ github.event.inputs.rename }}
           UPLOAD_FORMAT: ${{ github.event.inputs.fmt }}
           THUMB_FILE_ID: ${{ github.event.inputs.thumb }}
+          EXTRACT_SUBS: ${{ github.event.inputs.extract_subs }}
           CHAT_ID: ${{ github.event.inputs.chat_id }}
           TRIGGER_MSG_ID: ${{ github.event.inputs.trigger_msg_id }}
         run: python leech_worker.py
