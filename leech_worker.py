@@ -43,6 +43,7 @@ URL = os.getenv("URL")
 RENAME = (os.getenv("RENAME") or "").strip()
 UPLOAD_FORMAT = (os.getenv("UPLOAD_FORMAT") or "media").strip().lower()
 THUMB_FILE_ID = (os.getenv("THUMB_FILE_ID") or "").strip()
+EXTRACT_SUBS = (os.getenv("EXTRACT_SUBS") or "false").strip().lower() == "true"
 CHAT_ID = int(os.getenv("CHAT_ID"))
 TRIGGER_MSG_ID = os.getenv("TRIGGER_MSG_ID", "none")
 
@@ -54,6 +55,7 @@ os.makedirs(FAST_EXTRACT_DIR, exist_ok=True)
 VIDEO_EXTS = ('.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v', '.flv', '.ts', '.3gp')
 DOC_EXTS = ('.zip', '.rar', '.7z', '.pdf')
 ALLOWED_EXTS = VIDEO_EXTS + DOC_EXTS
+SUB_EXTS = ('.ass', '.ssa', '.srt', '.vtt')
 
 SITE_TAG = "@asi_anime"
 
@@ -261,6 +263,63 @@ def list_torrent_files(dest_dir):
     return found
 
 
+_TEXT_SUB_EXT = {"ass": ".ass", "ssa": ".ass", "subrip": ".srt", "srt": ".srt",
+                 "webvtt": ".vtt", "mov_text": ".srt", "text": ".srt"}
+
+
+def extract_subtitles(video_path, out_dir, stem):
+    """Video ke andar ke text subtitle tracks ko stream-copy se alag files bana deta hai
+    (ek hi ffmpeg pass, re-encode nahi, isliye CPU par load nahi)."""
+    result = {"files": [], "bitmap": 0, "total": 0}
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "s",
+             "-show_entries", "stream=index,codec_name:stream_tags=language,title",
+             "-of", "json", video_path],
+            capture_output=True, text=True, timeout=120)
+        streams = json.loads(r.stdout or "{}").get("streams") or []
+    except Exception as e:
+        print(f"Subtitle probe failed ({video_path}): {e}")
+        return result
+
+    result["total"] = len(streams)
+    jobs = []  # (out_path, stream_index, codec_args)
+    used = {}
+    os.makedirs(out_dir, exist_ok=True)
+    for n, st in enumerate(streams, 1):
+        codec = (st.get("codec_name") or "").lower()
+        ext = _TEXT_SUB_EXT.get(codec)
+        if not ext:
+            result["bitmap"] += 1  # PGS / VobSub jaise image wale subtitles text mein nahi badal sakte
+            continue
+        lang = re.sub(r'[^A-Za-z0-9_-]', '', (st.get("tags") or {}).get("language") or "")
+        if not lang or lang.lower() == "und":
+            lang = f"track{n}"
+        key = lang.lower() + ext
+        used[key] = used.get(key, 0) + 1
+        tag = lang if used[key] == 1 else f"{lang}.{used[key]}"
+        name = re.sub(r'[\\/:*?"<>|\r\n\t]', '', f"{stem[:120]}.{tag}{ext}")
+        codec_args = ["-c:s", "srt"] if codec in ("mov_text", "text") else ["-c:s", "copy"]
+        jobs.append((os.path.join(out_dir, name), st["index"], codec_args))
+
+    def run(batch):
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", video_path]
+        for out_path, index, codec_args in batch:
+            cmd += ["-map", f"0:{index}"] + codec_args + [out_path]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        except Exception as e:
+            print(f"Subtitle extract failed: {e}")
+
+    if jobs:
+        run(jobs)  # sabhi tracks ek hi pass mein
+        for job in jobs:  # jo ban nahi paaye unhe alag-alag try karo
+            if not (os.path.exists(job[0]) and os.path.getsize(job[0]) > 0):
+                run([job])
+        result["files"] = [j[0] for j in jobs if os.path.exists(j[0]) and os.path.getsize(j[0]) > 0]
+    return result
+
+
 # ---------------- STATUS via plain Bot API (no need to wait on Pyrogram) ----------------
 status_msg_id = None
 
@@ -400,6 +459,7 @@ async def main():
     send_status("⚡ Starting Fast Leech on GitHub Actions...")
 
     try:
+        t_start = time.time()
         url = bypass_pixeldrain(URL)
         torrent_mode = is_torrent_source(url)
         source_files = []
@@ -422,9 +482,12 @@ async def main():
             return
 
         size_gb = sum(os.path.getsize(p) for p in source_files) / (1024 ** 3)
+        dl_secs = max(time.time() - t_start, 0.001)
+        print(f"[TIMING] download: {size_gb * 1024:.1f}MB in {dl_secs:.0f}s ({size_gb * 1024 / dl_secs:.2f} MB/s)")
         edit_status(f"✅ Downloaded! Size: {size_gb:.2f} GB.\nProcessing...")
 
         files_to_send = []
+        external_subs = []
         came_from_archive = False
         extract_no = 0
 
@@ -440,16 +503,21 @@ async def main():
                     for file in files:
                         if file.lower().endswith(ALLOWED_EXTS):
                             files_to_send.append(os.path.join(root, file))
+                        elif EXTRACT_SUBS and file.lower().endswith(SUB_EXTS):
+                            external_subs.append(os.path.join(root, file))
             elif torrent_mode:
                 if src.lower().endswith(ALLOWED_EXTS):
                     files_to_send.append(src)
+                elif EXTRACT_SUBS and src.lower().endswith(SUB_EXTS):
+                    external_subs.append(src)
             else:
                 files_to_send.append(src)
 
         files_to_send.sort(key=natural_key)
+        external_subs.sort(key=natural_key)
         total_files = len(files_to_send)
 
-        if total_files == 0:
+        if total_files == 0 and not external_subs:
             edit_status("❌ No supported files found to upload.")
             return
 
@@ -459,6 +527,7 @@ async def main():
                      text="⚠️ Episode detect nahi hua, order se number diya:\n" + "\n".join(guessed[:15]))
 
         thumb_path = prepare_thumb()
+        sub_notes = []
 
         for idx, f in enumerate(files_to_send, 1):
             f = apply_name(f, final_names.get(f))
@@ -475,6 +544,13 @@ async def main():
             caption = f_name
             extra = {"thumb": thumb_path} if thumb_path else {}
 
+            sub_task = None
+            if EXTRACT_SUBS and f_ext in VIDEO_EXTS:
+                sub_dir = os.path.join(FAST_EXTRACT_DIR, f"subs_{idx}")
+                sub_task = asyncio.create_task(
+                    asyncio.to_thread(extract_subtitles, f, sub_dir, os.path.splitext(f_name)[0]))
+            t_up = time.time()
+
             try:
                 if f_ext in VIDEO_EXTS and UPLOAD_FORMAT != "document":
                     await app.send_video(CHAT_ID, f, caption=caption, supports_streaming=True,
@@ -486,7 +562,41 @@ async def main():
                 print(f"Error uploading {f_name}: {up_err}")
                 _tg_call("sendMessage", chat_id=CHAT_ID, text=f"❌ Failed to upload {f_name}\nError: {up_err}")
 
+            up_secs = max(time.time() - t_up, 0.001)
+            print(f"[TIMING] upload {f_name}: {f_size * 1024:.1f}MB in {up_secs:.0f}s ({f_size * 1024 / up_secs:.2f} MB/s)")
+
+            if sub_task is not None:
+                sub_res = await sub_task
+                for sp in sub_res["files"]:
+                    try:
+                        await app.send_document(CHAT_ID, sp, caption=os.path.basename(sp))
+                    except Exception as sub_err:
+                        print(f"Error sending subtitle {sp}: {sub_err}")
+                        _tg_call("sendMessage", chat_id=CHAT_ID,
+                                 text=f"❌ Failed to upload {os.path.basename(sp)}\nError: {sub_err}")
+                    finally:
+                        if os.path.exists(sp):
+                            os.remove(sp)
+                if sub_res["total"] == 0:
+                    sub_notes.append(f"{f_name}: koi subtitle track nahi mila")
+                elif sub_res["bitmap"]:
+                    sub_notes.append(f"{f_name}: {sub_res['bitmap']} image-based subtitle track (PGS/VobSub) text mein nahi badal sakte")
+
             os.remove(f)
+
+        for sp in external_subs:
+            try:
+                await app.send_document(CHAT_ID, sp, caption=os.path.basename(sp))
+            except Exception as sub_err:
+                print(f"Error sending subtitle {sp}: {sub_err}")
+                _tg_call("sendMessage", chat_id=CHAT_ID,
+                         text=f"❌ Failed to upload {os.path.basename(sp)}\nError: {sub_err}")
+            finally:
+                if os.path.exists(sp):
+                    os.remove(sp)
+
+        if sub_notes:
+            _tg_call("sendMessage", chat_id=CHAT_ID, text="ℹ️ Subtitles:\n" + "\n".join(sub_notes[:15]))
 
         edit_status(f"🏁 Successfully Leeched & Uploaded {total_files} file(s)!")
 
