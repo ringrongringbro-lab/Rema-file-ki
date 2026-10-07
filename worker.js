@@ -110,6 +110,7 @@ async function dispatch(env, t, st, triggerMsgId) {
           rename: t.rename || "",
           fmt: st.format,
           thumb: st.thumb || "",
+          extract_subs: t.extract ? "true" : "false",
         },
       }),
     });
@@ -160,10 +161,10 @@ async function pump(env) {
   }
 }
 
-async function createTask(env, uid, chat, url, rename) {
+async function createTask(env, uid, chat, url, rename, extract) {
   const r = await env.DB.prepare(
-    "INSERT INTO tasks (user_id, chat_id, url, rename, status, created_at) VALUES (?,?,?,?, 'queued', ?)"
-  ).bind(uid, chat, url, rename || "", now()).run();
+    "INSERT INTO tasks (user_id, chat_id, url, rename, extract, status, created_at) VALUES (?,?,?,?,?, 'queued', ?)"
+  ).bind(uid, chat, url, rename || "", extract ? 1 : 0, now()).run();
   const id = r.meta.last_row_id;
   await pump(env);
   const t = await env.DB.prepare("SELECT status FROM tasks WHERE id=?").bind(id).first();
@@ -245,17 +246,18 @@ async function onMessage(env, msg) {
   await clearPending(env, uid); // koi bhi command purana wait cancel kar deta hai
 
   if (cmd === "/start") {
-    await send(env, chat, "🙋‍♂️ Bot ready hai! /leech link bhejo.");
-  } else if (cmd === "/leech") {
+    await send(env, chat, "🙋‍♂️ Bot ready hai! /leech link bhejo. Subtitles alag chahiye to /leechextract link.");
+  } else if (cmd === "/leech" || cmd === "/leechextract") {
+    const extract = cmd === "/leechextract";
     const link = arg.split(/\s+/)[0] || "";
     if (!/^(https?:\/\/|magnet:\?)/i.test(link)) {
       await send(
         env, chat,
-        "Usage:\n/leech link\n\nExample:\n/leech https://pixeldrain.com/u/xxxx\n/leech https://nyaa.si/download/2170047.torrent"
+        `Usage:\n${cmd} link\n\nExample:\n${cmd} https://pixeldrain.com/u/xxxx\n${cmd} https://nyaa.si/download/2170047.torrent`
       );
       return;
     }
-    await setPending(env, uid, "rename", JSON.stringify({ url: link }), chat, 600);
+    await setPending(env, uid, "rename", JSON.stringify({ url: link, extract }), chat, 600);
     await send(env, chat, "✏️ You want rename this file?\nAgar haa toh name bhejo.\nAgar nahi toh skip ke liye S bhejo.");
   } else if (cmd === "/setting") {
     await send(env, chat, "⚙️ Settings", { reply_markup: settingsKeyboard(env, uid) });
@@ -294,7 +296,7 @@ async function handlePendingInput(env, msg, uid, chat, text) {
 
   if (p.kind === "rename") {
     if (!text) return;
-    const { url } = JSON.parse(p.data);
+    const { url, extract } = JSON.parse(p.data);
     await clearPending(env, uid);
     const skip = text.toUpperCase() === "S";
     const rename = skip ? "" : safeName(text);
@@ -302,7 +304,7 @@ async function handlePendingInput(env, msg, uid, chat, text) {
       await send(env, chat, "Naam sahi nahi hai, /leech dobara bhejo.");
       return;
     }
-    await createTask(env, uid, chat, url, rename);
+    await createTask(env, uid, chat, url, rename, !!extract);
     return;
   }
 
@@ -446,6 +448,7 @@ async function setup(env, url) {
   const commands = await tg(env, "setMyCommands", {
     commands: [
       { command: "leech", description: "Link se file leech karo" },
+      { command: "leechextract", description: "Leech + video ke subtitles alag bhejo" },
       { command: "setting", description: "Thumbnail, Format, Allowed Users" },
       { command: "cancel", description: "Task cancel karo" },
     ],
